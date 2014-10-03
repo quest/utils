@@ -487,10 +487,13 @@ class SoftDeleteBehavior extends ModelBehavior {
 			)
 		));
 		if (empty($results)) {
-			return;
+			return true;
 		}
+
 		foreach ($results as $result) {
 			$this->delete($model, $result[$model->alias][$model->primaryKey]);
 		}
+
+		return true;
 	}
 }
