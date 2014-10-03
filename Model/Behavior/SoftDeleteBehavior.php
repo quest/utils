@@ -133,7 +133,7 @@ class SoftDeleteBehavior extends ModelBehavior {
 		$runtime = $this->runtime[$model->alias];
 		if ($runtime) {
 			if ($model->beforeDelete($cascade)) {
-				$this->delete($model, $model->id);
+				$this->delete($model, $model->id, $cascade);
 			}
 			return false;
 		}
@@ -147,7 +147,7 @@ class SoftDeleteBehavior extends ModelBehavior {
  * @param integer $id
  * @return boolean
  */
-	public function delete($model, $id) {
+	public function delete($model, $id, $cascade = true) {
 		$runtime = $this->runtime[$model->alias];
 
 		$data = array();
@@ -172,6 +172,10 @@ class SoftDeleteBehavior extends ModelBehavior {
 		));
 
 		if (!empty($record)) {
+
+			$this->_deleteDependent($model, $id, $cascade);
+			$this->_deleteLinks($model, $id);
+
 			$model->set($model->primaryKey, $id);
 			unset($model->data[$model->alias]['modified']);
 			unset($model->data[$model->alias]['updated']);
@@ -182,6 +186,88 @@ class SoftDeleteBehavior extends ModelBehavior {
 		}
 
 		return true;
+	}
+
+/**
+ * Cascades model deletes through associated hasMany and hasOne child records.
+ *
+ * @param Model $model Model object
+ * @param string $id ID of record that was deleted
+ * @param bool $cascade Set to true to delete records that depend on this record
+ * @return void
+ */
+	protected function _deleteDependent($model, $id, $cascade) {
+		if ($cascade !== true) {
+			return;
+		}
+
+		if (!empty($model->__backAssociation)) {
+			$savedAssociations = $model->__backAssociation;
+			$model->__backAssociation = array();
+		}
+
+		foreach (array_merge($model->hasMany, $model->hasOne) as $assoc => $data) {
+			if ($data['dependent'] !== true) {
+				continue;
+			}
+
+			$Model = $model->{$assoc};
+
+			if ($data['foreignKey'] === false && $data['conditions'] && in_array($model->name, $Model->getAssociated('belongsTo'))) {
+				$Model->recursive = 0;
+				$conditions = array($model->escapeField(null, $model->name) => $id);
+			} else {
+				$Model->recursive = -1;
+				$conditions = array($Model->escapeField($data['foreignKey']) => $id);
+				if ($data['conditions']) {
+					$conditions = array_merge((array)$data['conditions'], $conditions);
+				}
+			}
+
+			if (isset($data['exclusive']) && $data['exclusive']) {
+				$this->softDeleteAll($Model, $conditions);
+			} else {
+				$records = $Model->find('all', array(
+					'conditions' => $conditions, 'fields' => $Model->primaryKey
+				));
+
+				if (!empty($records)) {
+					foreach ($records as $record) {
+						$Model->delete($record[$Model->alias][$Model->primaryKey]);
+					}
+				}
+			}
+		}
+
+		if (isset($savedAssociations)) {
+			$model->__backAssociation = $savedAssociations;
+		}
+	}
+
+/**
+ * Cascades model deletes through HABTM join keys.
+ *
+ * @param Model $model Model object
+ * @param string $id ID of record that was deleted
+ * @return void
+ */
+	protected function _deleteLinks($model, $id) {
+		foreach ($model->hasAndBelongsToMany as $data) {
+			list(, $joinModel) = pluginSplit($data['with']);
+			$Model = $model->{$joinModel};
+			$records = $Model->find('all', array(
+				'conditions' => array($Model->escapeField($data['foreignKey']) => $id),
+				'fields' => $Model->primaryKey,
+				'recursive' => -1,
+				'callbacks' => false
+			));
+
+			if (!empty($records)) {
+				foreach ($records as $record) {
+					$Model->delete($record[$Model->alias][$Model->primaryKey]);
+				}
+			}
+		}
 	}
 
 /**
