@@ -277,7 +277,7 @@ class SoftDeleteBehavior extends ModelBehavior {
  * @param integer $id
  * @return boolean
  */
-	public function undelete($model, $id) {
+	public function undelete($model, $id, $cascade = true) {
 		$runtime = $this->runtime[$model->alias];
 		$this->softDelete($model, false);
 
@@ -295,6 +295,9 @@ class SoftDeleteBehavior extends ModelBehavior {
 			}
 		}
 
+		$this->_undeleteDependent($id, $model, $cascade);
+		$this->_undeleteLinks($id, $model);
+
 		$model->create();
 		$model->set($model->primaryKey, $id);
 		$result = $model->save(array($model->alias => $data), false, array_keys($data));
@@ -304,6 +307,82 @@ class SoftDeleteBehavior extends ModelBehavior {
 		}
 		return false;
 	}
+
+
+	protected function _undeleteDependent($id, $model, $cascade) {
+		if ($cascade !== true) {
+			return;
+		}
+
+		if (!empty($model->__backAssociation)) {
+			$savedAssociations = $model->__backAssociation;
+			$model->__backAssociation = array();
+		}
+
+		$depedencias = array_merge($model->hasMany, $model->hasOne);
+
+		foreach ($depedencias as $assoc => $data) {
+			if ($data['dependent'] !== true) {
+				continue;
+			}
+
+			$Model = $model->{$assoc};
+			$Model->softDelete($model, false);
+
+			if ($data['foreignKey'] === false && $data['conditions'] && in_array($model->name, $Model->getAssociated('belongsTo'))) {
+				$Model->recursive = 0;
+				$conditions = array($model->escapeField(null, $model->name) => $id);
+			} else {
+				$Model->recursive = -1;
+				$conditions = array($Model->escapeField($data['foreignKey']) => $id);
+				if ($data['conditions']) {
+					$conditions = array_merge((array)$data['conditions'], $conditions);
+				}
+			}
+
+
+			$records = $Model->find('all', array(
+				'conditions' => $conditions, 'fields' => $Model->primaryKey
+			));
+
+			if (!empty($records)) {
+				foreach ($records as $record) {
+					$Model->undelete($record[$Model->alias][$Model->primaryKey]);
+				}
+			}
+
+			$Model->softDelete($model, true);
+		}
+
+		if (isset($savedAssociations)) {
+			$model->__backAssociation = $savedAssociations;
+		}
+	}
+
+
+	protected function _undeleteLinks($id, $model) {
+		foreach ($model->hasAndBelongsToMany as $data) {
+			list(, $joinModel) = pluginSplit($data['with']);
+			$Model = $model->{$joinModel};
+			$Model->softDelete($model, false);
+			$records = $Model->find('all', array(
+				'conditions' => array($Model->escapeField($data['foreignKey']) => $id),
+				'fields' => $Model->primaryKey,
+				'recursive' => -1,
+				'callbacks' => false
+			));
+
+			if (!empty($records)) {
+				foreach ($records as $record) {
+					$Model->undelete($record[$Model->alias][$Model->primaryKey]);
+				}
+			}
+
+			$Model->softDelete($model, true);
+		}
+	}
+
+
 
 /**
  * Enable/disable SoftDelete functionality
